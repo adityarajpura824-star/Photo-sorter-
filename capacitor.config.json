@@ -1,0 +1,9 @@
+{
+  "appId": "com.photosorter.app",
+  "appName": "Photo Sorter",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false }
+  }
+}

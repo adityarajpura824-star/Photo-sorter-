@@ -1,0 +1,20 @@
+{
+  "name": "photo-sorter-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Photo Sorter for Android: sorts a camera roll into folders and finds duplicates, all on the phone.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "6.2.3",
+    "@capacitor/cli": "6.2.3",
+    "@capacitor/core": "6.2.3",
+    "@capacitor/filesystem": "6.0.4"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "3.8.1"
+  }
+}

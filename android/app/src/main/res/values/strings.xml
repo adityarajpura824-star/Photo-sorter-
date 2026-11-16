@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Photo Sorter</string>
+    <string name="title_activity_main">Photo Sorter</string>
+    <string name="package_name">com.photosorter.app</string>
+    <string name="custom_url_scheme">com.photosorter.app</string>
+</resources>
