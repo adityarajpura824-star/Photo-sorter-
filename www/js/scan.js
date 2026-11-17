@@ -1,6 +1,7 @@
 // Step 1, on the phone: read each picked file (never changed), fingerprint it, make a 256px preview and a 72px copy
 // for the animation, and a perceptual hash for finding look-alikes.
 import { extOf, kindOf, phashFromGray } from "./core.js";
+import * as library from "./library.js";
 
 const PREVIEW = 256, MINI = 72;
 const blob = (c, q) => new Promise(r => c.toBlob(r, "image/jpeg", q));
@@ -33,6 +34,10 @@ async function photoPreview(file) {
   const bmp = await createImageBitmap(file); // applies the photo's rotation
   try { return { c: square(bmp, bmp.width, bmp.height, PREVIEW), w: bmp.width, h: bmp.height }; } finally { bmp.close?.(); }
 }
+async function nativePreview(file) { // the phone makes the preview (a video gives a frame), so even HEIC and huge files are cheap
+  const bmp = await createImageBitmap(await library.thumb(file));
+  try { return { c: square(bmp, bmp.width, bmp.height, PREVIEW), w: file.w || bmp.width, h: file.h || bmp.height, duration: file.kind === "video" ? file.duration : undefined }; } finally { bmp.close?.(); }
+}
 function videoPreview(file) {
   return new Promise((res, rej) => {
     const v = document.createElement("video"), url = URL.createObjectURL(file);
@@ -47,12 +52,12 @@ function videoPreview(file) {
 
 // -> { rec, thumb: Blob, mini: Blob }. A file that cannot be read stays in the list, flagged, with a grey preview.
 export async function scanFile(file, id) {
-  const kind = kindOf(file.name, file.type) || "photo";
+  const kind = file.kind || kindOf(file.name, file.type) || "photo";
   const rec = { id, name: file.name, ext: extOf(file.name) || (kind === "video" ? ".mp4" : ".jpg"), kind, bytes: file.size, taken: file.lastModified ? Math.round(file.lastModified / 1000) : null };
-  try { rec.sha = await fingerprint(file); } catch { rec.sha = `unreadable-${id}`; }
+  try { rec.sha = file.native ? await library.sha(file) : await fingerprint(file); } catch { rec.sha = `unreadable-${id}`; }
   let c;
   try {
-    const p = kind === "video" ? await videoPreview(file) : await photoPreview(file);
+    const p = file.native ? await nativePreview(file) : kind === "video" ? await videoPreview(file) : await photoPreview(file);
     c = p.c; rec.w = p.w; rec.h = p.h; if (p.duration != null) rec.duration = p.duration;
     rec.phash = phashFromGray(grayOf(c));
   } catch (e) {
@@ -87,11 +92,11 @@ export async function pixelsDiffer(thumbA, thumbB) {
 
 // A handful of tiny random previews shown right after picking, like the original's "peek".
 export async function peek(files, n = 12) {
-  const pics = files.filter(f => kindOf(f.name, f.type) === "photo").slice(0, 400).sort(() => Math.random() - 0.5).slice(0, n * 2);
+  const pics = files.filter(f => (f.kind || kindOf(f.name, f.type)) === "photo").slice(0, 400).sort(() => Math.random() - 0.5).slice(0, n * 2);
   const out = [];
   for (const f of pics) {
     if (out.length >= n) break;
-    try { const b = await createImageBitmap(f); const c = square(b, b.width, b.height, 64); b.close?.(); out.push(URL.createObjectURL(await blob(c, 0.7))); } catch {}
+    try { const b = await createImageBitmap(f.native ? await library.thumb(f, 96) : f); const c = square(b, b.width, b.height, 64); b.close?.(); out.push(URL.createObjectURL(await blob(c, 0.7))); } catch {}
   }
   return out;
 }

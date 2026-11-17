@@ -3,6 +3,7 @@
 import { buildCsvs } from "./core.js";
 import { toBase64 } from "./label.js";
 import { cap, isNative, plugin } from "./platform.js";
+import * as library from "./library.js";
 
 export const canSave = isNative;
 const FS = () => plugin("Filesystem");
@@ -45,7 +46,8 @@ export async function saveAll({ dest, recs, plan, files, previous = [], onProgre
     const f = files.get(p.id);
     try {
       if (!f) throw new Error("the original is no longer open");
-      await writeBlob(`${base}/${p.rel}`, f);
+      if (f.native) await library.copy(f, `${base}/${p.rel}`); // the phone copies it itself, however big
+      else await writeBlob(`${base}/${p.rel}`, f);
       ok.push(p);
     } catch (e) { failed.push(`${p.rel}: ${e.message || e}`); }
     onProgress(++n, plan.length);

@@ -49,6 +49,11 @@ print("picked in order:", picked)
 # ---------- local web server ----------
 class Q(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a): pass
+    def do_GET(self):  # /__media__/<name> serves the test photos, like the phone's gallery would
+        if self.path.startswith("/__media__/"):
+            data = open(os.path.join(tmp, os.path.basename(self.path.split("/__media__/")[1])), "rb").read()
+            self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        super().do_GET()
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=WWW)); PORT = srv.server_address[1]
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 URL = f"http://localhost:{PORT}/"
@@ -77,6 +82,40 @@ window.Capacitor = {
   },
 };
 """
+
+# the phone's gallery plugin (MediaLibrary): the same 10 test files, served to the page as if MediaStore listed them
+FAKE_LIB = """
+(() => {
+  const media = __MEDIA__;
+  const url = u => '/__media__/' + encodeURIComponent(decodeURIComponent(u.split('/').pop()));
+  const lib = window.__lib = { grant: true, calls: [] };
+  const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  const isVideo = m => m.type.startsWith('video');
+  window.Capacitor.Plugins.MediaLibrary = {
+    requestAccess: async () => { lib.calls.push(['requestAccess']); return { granted: lib.grant }; },
+    openSettings: async () => { lib.calls.push(['openSettings']); },
+    list: async o => {
+      lib.calls.push(['list', o.kind, o.offset, o.skip]);
+      const all = media.filter(m => (isVideo(m) ? 'video' : 'photo') === o.kind);
+      return { items: all.slice(o.offset, o.offset + o.limit).map(m => ({ uri: 'content://media/external/' + encodeURIComponent(m.name), name: m.name, type: m.type, size: m.size, taken: m.taken, w: m.w, h: m.h, ...(isVideo(m) ? { duration: m.duration } : {}) })) };
+    },
+    thumb: async o => {
+      lib.calls.push(['thumb']);
+      const c = document.createElement('canvas');
+      if (o.uri.endsWith('.mp4')) { c.width = c.height = 200; const x = c.getContext('2d'); x.fillStyle = '#556'; x.fillRect(0, 0, 200, 200); }
+      else { const bmp = await createImageBitmap(await (await fetch(url(o.uri))).blob()); const k = Math.min(1, o.size / Math.max(bmp.width, bmp.height)); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); }
+      return { data: c.toDataURL('image/jpeg', 0.85).split(',')[1], w: c.width, h: c.height };
+    },
+    sha: async o => ({ sha: hex(await crypto.subtle.digest('SHA-256', await (await fetch(url(o.uri))).arrayBuffer())) }),
+    copy: async o => { const b = new Uint8Array(await (await fetch(url(o.uri))).arrayBuffer()); window.__fs[o.path] = b; lib.calls.push(['copy', o.path, b.length]); return { bytes: b.length }; },
+  };
+})();
+"""
+media_list = []
+for n in picked:
+    f = os.path.join(tmp, n); v = n.endswith(".mp4"); w, h = (320, 240) if v else Image.open(f).size
+    media_list.append({"name": n, "type": "video/mp4" if v else "image/png" if n.endswith(".png") else "image/jpeg", "size": os.path.getsize(f), "taken": int(os.path.getmtime(f) * 1000), "w": w, "h": h, "duration": 3})
+FAKE_LIB = FAKE_LIB.replace("__MEDIA__", json.dumps(media_list))
 
 def claude_answer(route, request):
     if request.method == "OPTIONS":
@@ -191,6 +230,47 @@ with sync_playwright() as p:
 
     # ---- 6. dark theme ----
     pg.click("#theme"); pg.wait_for_timeout(300); pg.screenshot(path=f"{SHOTS}/15-dark.png")
+
+    # ---- 7. one tap: the app reads the whole gallery itself, nothing is picked ----
+    state["claude_calls"].clear()
+    ctx3 = b.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True)
+    g = ctx3.new_page(); g.add_init_script(FAKE_CAP); g.add_init_script(FAKE_LIB)
+    g.add_init_script("localStorage.setItem('settings', JSON.stringify({labeler: 'claude', claudeKey: 'sk-test-123'}))")
+    g.on("pageerror", lambda e: errors.append(str(e)))
+    g.route("https://api.anthropic.com/**", claude_answer)
+    g.goto(URL); g.wait_for_selector("text=Sort all my photos")
+    g.screenshot(path=f"{SHOTS}/16-gallery-setup.png")
+    setup_txt = g.inner_text("main")
+    check("gallery: setup offers one Sort button, no picker needed", "Sort all my photos" in setup_txt and "Choose photos & videos" not in setup_txt and "Or choose photos myself" in setup_txt, setup_txt[:200])
+    g.get_by_text("Sort all my photos").click()
+    g.wait_for_selector("text=Spend tokens", timeout=20000); g.screenshot(path=f"{SHOTS}/17-gallery-confirm.png")
+    check("gallery: the confirmation counts all 10 files it found itself", "10 files" in g.inner_text(".sheet"), g.inner_text(".sheet")[:120])
+    g.get_by_text("Spend tokens").click()
+    g.wait_for_selector("body.is-done", timeout=60000); g.wait_for_timeout(1000)
+    g.screenshot(path=f"{SHOTS}/18-gallery-done.png")
+    lib_calls = g.evaluate("window.__lib.calls")
+    check("gallery: asked for access once", sum(1 for c in lib_calls if c[0] == "requestAccess") == 1)
+    check("gallery: listed photos and videos, leaving out its own output folder", [c[1] for c in lib_calls if c[0] == "list"] == ["photo", "video"] and all(c[3] == "Photo Sorter" for c in lib_calls if c[0] == "list"), [c for c in lib_calls if c[0] == "list"])
+    check("gallery: total is 10 files", g.inner_text("#bigN").strip() == "10", g.inner_text("#bigN"))
+    gfs = g.evaluate("Object.fromEntries(Object.entries(window.__fs).map(([k,v]) => [k, v.length]))")
+    gmedia = [x for x in gfs if not x.endswith(".csv")]
+    check("gallery: the phone copied all 10 files itself", sum(1 for c in lib_calls if c[0] == "copy") == 10 and len(gmedia) == 10, (len(gmedia), [c[:2] for c in lib_calls if c[0] == "copy"][:3]))
+    check("gallery: no file bytes went through the page (no chunked writes)", not any(c[0] == "append" for c in g.evaluate("window.__calls")))
+    check("gallery: big file byte-exact", any(x.endswith("f_big_noise.jpg") and gfs[x] == os.path.getsize(os.path.join(tmp, "f_big_noise.jpg")) for x in gmedia))
+    check("gallery: duplicates found and set aside", len([x for x in gmedia if "_Review/duplicates" in x]) >= 2, [x for x in gmedia if "_Review" in x])
+    gcsv = bytes(g.evaluate("Array.from(window.__fs['Photo Sorter/sorted.csv'])")).decode()
+    check("gallery: sorted.csv written with 10 rows", gcsv.startswith("file,folder,original_name") and gcsv.count("\r\n") == 11, gcsv[:120])
+    check("gallery: same duplicates as the picked-file run", sorted(x for x in gmedia if "_Review" in x) == sorted(x for x in paths if "_Review" in x), (sorted(x for x in gmedia if "_Review" in x), dups))
+    check("gallery: Claude asked once with the same key", len(state["claude_calls"]) == 1 and state["claude_calls"][0]["key"] == "sk-test-123", state["claude_calls"])
+
+    # access refused: a clear message and a way to Settings, nothing is sorted
+    ctx4 = b.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True)
+    d = ctx4.new_page(); d.add_init_script(FAKE_CAP); d.add_init_script(FAKE_LIB); d.add_init_script("window.__lib.grant = false")
+    d.on("pageerror", lambda e: errors.append(str(e)))
+    d.goto(URL); d.wait_for_selector("text=Sort all my photos"); d.get_by_text("Sort all my photos").click()
+    d.wait_for_selector("text=needs to see your photos"); d.screenshot(path=f"{SHOTS}/19-gallery-denied.png")
+    d.get_by_text("Open settings").click(); d.wait_for_timeout(300)
+    check("gallery: refused access shows a message and opens Settings", any(c[0] == "openSettings" for c in d.evaluate("window.__lib.calls")) and d.locator("body[data-mode=setup]").count() == 1)
     b.close()
 
 check("no page errors", not errors, errors[:5])

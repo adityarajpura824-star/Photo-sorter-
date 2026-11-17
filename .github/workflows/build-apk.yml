@@ -20,8 +20,14 @@ jobs:
       - run: npm run vendor      # on-device model runtime -> www/vendor
       - run: npx cap sync android
       - name: Build debug APK
+        shell: bash
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon 2>&1 | tee ../gradle.log
+      - name: Show the Gradle error (so it is readable without the full log)
+        if: failure()
+        run: |
+          msg=$(grep -E "error:|What went wrong|Execution failed|FAILURE" -A3 gradle.log | head -40 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Android build failed::${msg}"
 
       - uses: actions/upload-artifact@v4
         with:

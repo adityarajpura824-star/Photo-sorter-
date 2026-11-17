@@ -1,6 +1,7 @@
 # Photo Sorter (Android)
 
-Your camera roll, sorted on your phone. Pick photos and videos, and the app puts a copy of each into a folder
+Your camera roll, sorted on your phone. Tap **Sort all my photos** and the app reads your whole gallery by itself
+(no picking) and puts a copy of each photo and video into a folder
 (Selfies, Food, Travel, Screenshots, Video calls, …), finds duplicates, and shows it all live.
 Your originals are never moved, renamed or deleted.
 
@@ -27,7 +28,8 @@ Everything the original `claude-photo-sorter` does is here, with a simpler phone
 
 ## Using it
 
-- **Choose photos & videos**: in the picker open a folder such as Camera and use *Select all*.
+- **Sort all my photos**: the first time, Android asks to let the app see your photos and videos. Choose **Allow** (on Android 14, *Allow all*). After that, one tap sorts everything. Press it again later and only new photos need sorting.
+- If you refused, or shared only some photos, the app says so and opens Settings for you. *Or choose photos myself* is still there for a hand-picked set.
 - **Free on-device sorting** downloads a ~150 MB model the first time (Wi-Fi recommended), then works offline.
 - **Claude / Jev** are paid by the key you paste. The app shows an estimate and asks before it starts.
 - Copies are saved in **Documents / Photo Sorter** (change the name in Settings). **My files** shows the exact place.
@@ -44,9 +46,15 @@ cd android && ./gradlew assembleDebug
 
 To see the interface with drawn pictures and no phone: `python3 -m http.server -d www`, then open `http://localhost:8000/?demo`.
 
+## Notes
+
+- Needs Android 10 or newer. The native part is `android/.../MediaLibraryPlugin.java` (list the gallery, make previews, fingerprint and copy files, all on the phone).
+- Copies are made from what Android hands the app, which leaves out the GPS tag inside a photo. Your originals keep theirs.
+- Sorted copies live in Documents, which gallery apps may also show. The app skips its own output folder when it sorts again.
+
 ## Layout
 
 - `www/js/core.js` all the logic that decides things (folders, duplicates, planning, CSVs). Unit tested.
-- `www/js/scan.js`, `label.js`, `fsout.js` read files, label them, write the copies.
+- `www/js/library.js` the whole gallery; `scan.js`, `label.js`, `fsout.js` read files, label them, write the copies.
 - `www/js/app.js` the screens. `www/css/app.css` the look.
 - `test/e2e/run_e2e.py` drives the whole flow in a headless phone-sized browser with a fake phone filesystem.

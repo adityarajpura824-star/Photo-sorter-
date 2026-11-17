@@ -1,5 +1,5 @@
 /* Photo Sorter for the phone. Plain JS, no build step.
-   Screens: setup (pick photos) -> running (live sort) -> done (results, replay).  ?demo opens the fake camera roll. */
+   Screens: setup (one Sort button) -> running (live sort) -> done (results, replay).  ?demo opens the fake camera roll. */
 import {
   DEFAULT_CATEGORIES, TOKENS_PER_FILE, SHEET_TOKENS, SHEET_SIZE, fmt, size, mmss, roughly, kindOf, validateCategories, uniqueKey, folderName, fallbackKey,
   catsFingerprint, findDuplicates, resolveLabels, planOutput, folderCounts, overallProgress, secondsLeft, sampleFiles,
@@ -10,6 +10,7 @@ import { labelDevice, labelClaude, labelJev, FatalError } from "./label.js";
 import { saveAll, viewBase, moveFile, rewriteCsvs, cleanDest } from "./fsout.js";
 import { makeDemo } from "./demo.js";
 import { isNative } from "./platform.js";
+import * as library from "./library.js";
 
 const params = new URLSearchParams(location.search);
 const $ = id => document.getElementById(id);
@@ -110,20 +111,28 @@ function renderApp() {
   if (mode !== "setup") { buildCards(); renderPanel(); }
 }
 
+const kindFor = f => f.kind || kindOf(f.name, f.type); // gallery items already know their kind
 function summary() {
   if (pick.sum) return pick.sum;
-  const f = pick.files, photos = f.filter(x => kindOf(x.name, x.type) === "photo").length;
+  const f = pick.files, photos = f.filter(x => kindFor(x) === "photo").length;
   return (pick.sum = { total: f.length, photos, videos: f.length - photos, bytes: f.reduce((s, x) => s + x.size, 0) });
 }
 const effectiveCount = () => (settings.sample ? Math.min(200, summary().total) : summary().total);
 
 function setupView() {
   const box = el("div", { class: "setup rise" });
-  box.append(el("div", {}, el("h1", {}, "Sort my camera roll"), el("p", { class: "sub" }, "Pick your photos and videos. Nothing is moved, renamed or deleted. Sorted copies are saved on your phone.")));
+  const gallery = library.hasLibrary();
+  box.append(el("div", {}, el("h1", {}, "Sort my camera roll"), el("p", { class: "sub" }, (gallery ? "Photo Sorter looks through every photo and video on your phone by itself. " : "Pick your photos and videos. ") + "Nothing is moved, renamed or deleted. Sorted copies are saved on your phone.")));
   if (!pick.files.length) {
-    box.append(el("button", { class: "btn solid big", onclick: () => $("picker").click() }, icon("images"), "Choose photos & videos"));
-    box.append(el("p", { class: "hint" }, "Tip: in the picker, open a folder such as Camera and use Select all."));
+    if (gallery) {
+      box.append(el("button", { class: "btn solid big", onclick: sortGallery }, icon("play"), "Sort all my photos"));
+      box.append(el("p", { class: "hint" }, `The first time, Android asks to let Photo Sorter see your photos and videos. Choose "Allow". ${labelerBlurb()}`));
+    } else {
+      box.append(el("button", { class: "btn solid big", onclick: () => $("picker").click() }, icon("images"), "Choose photos & videos"));
+      box.append(el("p", { class: "hint" }, "Tip: in the picker, open a folder such as Camera and use Select all."));
+    }
     if (lastLibrary) box.append(el("button", { class: "btn big", onclick: restoreLast }, icon("check"), `View last sort (${fmt(lastLibrary.recs.length)} files)`));
+    if (gallery) box.append(el("div", { class: "row", style: "justify-content:center" }, el("button", { class: "linkish", onclick: () => $("picker").click() }, "Or choose photos myself")));
   } else {
     const s = summary();
     box.append(el("div", { class: "card picked" },
@@ -431,6 +440,26 @@ async function clearLibrary() {
 }
 const phase = p => { job.phase = p; job.done = 0; job.total = 0; job.phaseStarted = Date.now(); };
 
+// One tap: ask Android for access to the gallery (first time only), read the whole list, then sort it all.
+function needAccess(text) {
+  dialog("Photo Sorter needs to see your photos", [
+    el("p", {}, text),
+    el("p", { class: "meta", style: "margin-top:8px" }, `In Settings open Permissions, then Photos and videos (or Storage), and choose "Allow all". Then come back and press Sort again.`),
+  ], [el("button", { class: "btn ghost", onclick: closeAll }, "Not now"), el("button", { class: "btn solid", onclick: () => { closeAll(); library.openSettings(); } }, "Open settings")]);
+}
+async function sortGallery() {
+  if (job.running) return;
+  setPill("busy", "Opening your gallery");
+  try {
+    if (!(await library.access())) { setPill(null, ""); return needAccess("Without access to your photos and videos there is nothing to sort."); }
+    const found = await library.list(cleanDest(settings.dest), n => setPill("busy", `Reading your gallery · ${fmt(n)}`));
+    if (!found.length) { setPill(null, ""); return needAccess("No photos or videos were found. If you chose to share only some photos, Photo Sorter can only see those."); }
+    pick.files = found; pick.sum = null; pick.peek = await peek(found, 24);
+  } catch (e) { setPill(null, ""); return toast(`Could not read your gallery: ${e.message || e}`); }
+  setPill(null, "");
+  await startSorting();
+}
+
 async function startSorting() {
   if (job.running) return;
   const chosen = settings.sample ? sampleFiles(pick.files, 200) : pick.files;
@@ -448,7 +477,7 @@ async function startSorting() {
   await keepAwake(true);
   try {
     // 1. scan
-    const picked = chosen.slice().sort((a, b) => a.name.localeCompare(b.name) || a.lastModified - b.lastModified).filter(f => kindOf(f.name, f.type));
+    const picked = chosen.slice().sort((a, b) => a.name.localeCompare(b.name) || a.lastModified - b.lastModified).filter(kindFor);
     const done = await pool(picked, 3, async (f, i) => {
       const r = await scanFile(f, i);
       files.set(i, f); minis.set(i, r.mini); await store.put("thumbs", i, r.thumb);
@@ -629,7 +658,7 @@ function openFolder(c) {
 
 function viewUrl(it) { // the saved copy if there is one, else the picked file (this session), else the preview
   if (!demo && out.view && out.rels[it.id]) return out.view(out.rels[it.id]);
-  const f = files.get(it.id); if (f && !demo) return blobUrl("f" + it.id, f);
+  const f = files.get(it.id); if (f && !demo && !f.native) return blobUrl("f" + it.id, f);
   return null;
 }
 function lightbox(list, i) {
