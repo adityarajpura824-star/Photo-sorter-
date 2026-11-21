@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts # onnxruntime-node tries to download CUDA files; the app only uses the wasm build
       - run: npm test            # the sorting / duplicate logic must pass before an APK is built
       - run: npm run vendor      # on-device model runtime -> www/vendor
       - run: npx cap sync android

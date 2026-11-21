@@ -54,7 +54,7 @@ recognised from their name/folder and only go to the screenshot-type folders. Te
 ## Build it yourself
 
 ```
-npm ci
+npm ci --ignore-scripts
 npm test              # unit tests for sorting, recognition/teaching and duplicate logic
 npm run vendor        # copies the on-device model runtime into www/vendor
 npx cap sync android
