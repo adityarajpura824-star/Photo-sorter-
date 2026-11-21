@@ -9,20 +9,20 @@ export const SHEET_SIZE = 30;
 export const SHEETS_PER_BATCH = 3;
 
 export const DEFAULT_CATEGORIES = [
-  { key: "selfies", kind: "photo", label: "Selfies", emoji: "🤳", rule: "front-camera and mirror selfies of one person" },
-  { key: "people", kind: "photo", label: "People & family", emoji: "👨‍👩‍👧", rule: "photos of other people, groups, family, friends, portraits taken by someone else" },
-  { key: "pets", kind: "photo", label: "Pets & animals", emoji: "🐶", rule: "dogs, cats, any animal is the main subject" },
-  { key: "food", kind: "photo", label: "Food & drinks", emoji: "🍜", rule: "meals, snacks, drinks, cafes, the food is the subject" },
-  { key: "travel", kind: "photo", label: "Travel & nature", emoji: "🏔️", rule: "mountains, beaches, landscapes, monuments, trips, sky and sunsets" },
-  { key: "city", kind: "photo", label: "City & nights out", emoji: "🌃", rule: "streets, buildings, malls, cars, concerts, events, night city" },
-  { key: "home", kind: "photo", label: "Home & everyday", emoji: "🏠", rule: "rooms, desk setups, objects, shopping, products, anything everyday" },
-  { key: "docs", kind: "photo", label: "Documents & receipts", emoji: "🧾", rule: "photos of paper (IDs, bills, notes, whiteboards) and screenshots of payments, bookings, tickets, orders" },
-  { key: "memes", kind: "photo", label: "Memes & saved posts", emoji: "💡", rule: "screenshots of other people's posts, reels, tweets, articles, memes, ideas saved for later" },
-  { key: "screenshots", kind: "photo", label: "Other screenshots", emoji: "📱", rule: "any other screenshot: chats, apps, settings, maps, emails" },
-  { key: "vtalk", kind: "video", label: "Talking & selfie videos", emoji: "🎙️", rule: "a person talking to the camera, vlogs, selfie videos" },
-  { key: "vtravel", kind: "video", label: "Travel clips", emoji: "🚗", rule: "trips, landscapes, roads, outdoor scenery" },
-  { key: "vscreen", kind: "video", label: "Screen recordings", emoji: "🖥️", rule: "recordings of a phone or computer screen" },
-  { key: "vclips", kind: "video", label: "Everyday clips", emoji: "🎬", rule: "every other video: friends, family, pets, food, events" },
+  { key: "selfies", kind: "photo", label: "Selfies", emoji: "🤳", rule: "front-camera and mirror selfies of one person", clip: ["a selfie of a person", "a close-up selfie taken with a phone front camera", "a mirror selfie of a person holding a phone", "a person taking a selfie"] },
+  { key: "people", kind: "photo", label: "People & family", emoji: "👨‍👩‍👧", rule: "photos of other people, groups, family, friends, portraits taken by someone else", clip: ["a photo of a group of people posing together", "a photo of friends and family", "a portrait photo of a person standing", "a candid photo of people at a gathering"] },
+  { key: "pets", kind: "photo", label: "Pets & animals", emoji: "🐶", rule: "dogs, cats, any animal is the main subject", clip: ["a photo of a dog", "a photo of a cat", "a photo of a pet animal", "a close-up photo of an animal"] },
+  { key: "food", kind: "photo", label: "Food & drinks", emoji: "🍜", rule: "meals, snacks, drinks, cafes, the food is the subject", clip: ["a photo of a plate of food", "a photo of a meal on a table in a restaurant", "a photo of a drink in a glass or cup", "a close-up photo of a dessert or a snack"] },
+  { key: "travel", kind: "photo", label: "Travel & nature", emoji: "🏔️", rule: "mountains, beaches, landscapes, monuments, trips, sky and sunsets", clip: ["a landscape photo of mountains", "a photo of a beach and the sea", "a photo of a scenic nature view under a sky", "a photo of a famous monument at a tourist place", "a photo of a sunset"] },
+  { key: "city", kind: "photo", label: "City & nights out", emoji: "🌃", rule: "streets, buildings, malls, cars, concerts, events, night city", clip: ["a photo of a city street with buildings", "a photo of a city skyline at night", "a photo of the inside of a shopping mall", "a photo of cars on a road", "a photo of a crowd at a concert or an event"] },
+  { key: "home", kind: "photo", label: "Home & everyday", emoji: "🏠", rule: "rooms, desk setups, objects, shopping, products, anything everyday", clip: ["a photo of a room inside a house", "a photo of a desk with a laptop", "a photo of an everyday object on a table", "a photo of a product for sale"] },
+  { key: "docs", kind: "photo", label: "Documents & receipts", emoji: "🧾", rule: "photos of paper (IDs, bills, notes, whiteboards) and screenshots of payments, bookings, tickets, orders", clip: ["a photo of a paper document", "a photo of a printed bill or receipt", "a photo of an identity card", "a screenshot of a payment confirmation", "a screenshot of an online order or a ticket", "a photo of handwritten notes or a whiteboard"], screen: true },
+  { key: "memes", kind: "photo", label: "Memes & saved posts", emoji: "💡", rule: "screenshots of other people's posts, reels, tweets, articles, memes, ideas saved for later", clip: ["a meme with text over a picture", "a screenshot of a social media post", "a screenshot of a tweet", "a screenshot of an instagram post or reel", "a screenshot of a news article"], screen: true },
+  { key: "screenshots", kind: "photo", label: "Other screenshots", emoji: "📱", rule: "any other screenshot: chats, apps, settings, maps, emails", clip: ["a screenshot of a chat conversation", "a screenshot of a phone app screen", "a screenshot of phone settings", "a screenshot of a map", "a screenshot of an email"], screen: true },
+  { key: "vtalk", kind: "video", label: "Talking & selfie videos", emoji: "🎙️", rule: "a person talking to the camera, vlogs, selfie videos", clip: ["a frame from a video of a person talking to the camera", "a selfie video frame of a person speaking", "a vlog frame with a face close to the camera"] },
+  { key: "vtravel", kind: "video", label: "Travel clips", emoji: "🚗", rule: "trips, landscapes, roads, outdoor scenery", clip: ["a frame from a video of a scenic landscape", "a frame from a video taken from a moving car on a road", "a frame from a travel video of mountains or a beach"] },
+  { key: "vscreen", kind: "video", label: "Screen recordings", emoji: "🖥️", rule: "recordings of a phone or computer screen", clip: ["a screen recording of a phone", "a recording of a computer screen", "a frame from a video of an app user interface"], screen: true },
+  { key: "vclips", kind: "video", label: "Everyday clips", emoji: "🎬", rule: "every other video: friends, family, pets, food, events", clip: ["a frame from a video of friends or family", "a frame from a video of a pet", "a frame from a video of people at an event", "a frame from a video of food"] },
 ];
 
 /* ---------- small helpers ---------- */
@@ -59,6 +59,65 @@ export function catsFingerprint(cats) { // labels are only reusable while the fo
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return (h >>> 0).toString(16);
+}
+
+/* ---------- recognising what a photo is about (the on-device image model) ---------- */
+// The image model reads short, concrete sentences far better than the long rules written for a chat AI.
+// A folder with a built-in prompt set uses it until you change its rule; any other folder uses its rule in two templates.
+const DEFAULT_BY_KEY = Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c.key, c]));
+export function clipPrompts(c) {
+  const d = DEFAULT_BY_KEY[c.key];
+  if (d && d.clip && d.rule === c.rule) return d.clip;
+  const r = (c.rule || c.label).trim();
+  return c.kind === "video" ? [`a frame from a video of ${r}`, `a video of ${r}`] : [`a photo of ${r}`, `a picture of ${r}`];
+}
+export const isScreenFolder = c => c.screen ?? !!DEFAULT_BY_KEY[c.key]?.screen;
+// Phones name and file screenshots and screen recordings clearly: that is a better clue than any image model.
+export const isScreenCapture = (name = "", rel = "") => /screen[ _-]?(shot|record|cap)/i.test(`${rel}/${name}`);
+// Which folders a file may go to: its own kind, and only the screen folders when it is a screenshot or a screen recording.
+export function candidates(cats, kind, screen) {
+  const same = cats.map((c, i) => i).filter(i => cats[i].kind === kind), scr = screen ? same.filter(i => isScreenFolder(cats[i])) : [];
+  return scr.length ? scr : same;
+}
+export function meanUnit(vecs) { // average of unit vectors, scaled back to length 1
+  const out = new Float64Array(vecs[0].length);
+  for (const v of vecs) for (let k = 0; k < out.length; k++) out[k] += v[k];
+  let n = 0; for (const x of out) n += x * x; n = Math.sqrt(n) || 1;
+  return Float64Array.from(out, x => x / n);
+}
+const dot = (a, b) => { let s = 0; for (let k = 0; k < a.length; k++) s += a[k] * b[k]; return s; };
+function softmax(logits) { const mx = Math.max(...logits), e = logits.map(x => Math.exp(x - mx)), t = e.reduce((a, b) => a + b, 0); return e.map(x => x / t); }
+
+// Picks a folder for one image vector. W: one unit vector per folder; cand: the folder indexes it may go to.
+export function classifyVec(v, W, cand, scale = 100) {
+  const p = softmax(cand.map(i => scale * dot(W[i], v)));
+  let a = 0; p.forEach((x, k) => { if (x > p[a]) a = k; });
+  const rest = p.filter((_, k) => k !== a);
+  return { i: cand[a], confidence: p[a], margin: p[a] - (rest.length ? Math.max(...rest) : 0) };
+}
+// Teaching: starts from the text vectors T and moves them toward the photos you labelled, so a few examples fix
+// the folders the text got wrong while the rest keep their zero-shot meaning (lambda pulls each vector back to its start).
+// examples: [{ vec, i, cand }]  (i = the folder you chose, cand = the folders that photo could go to)
+export function trainHead(T, examples, { steps = 200, lr = 0.001, lambda = 0.5, scale = 100 } = {}) {
+  const W = T.map(r => Float64Array.from(r)), n = examples.length;
+  if (!n) return W;
+  for (let s = 0; s < steps; s++) {
+    const G = W.map(() => new Float64Array(T[0].length));
+    for (const e of examples) {
+      const p = softmax(e.cand.map(i => scale * dot(W[i], e.vec)));
+      e.cand.forEach((i, k) => { const g = ((p[k] - (i === e.i ? 1 : 0)) * scale) / n; for (let d = 0; d < e.vec.length; d++) G[i][d] += g * e.vec[d]; });
+    }
+    W.forEach((w, i) => { for (let d = 0; d < w.length; d++) w[d] -= lr * (G[i][d] + 2 * lambda * (w[d] - T[i][d])); });
+  }
+  return W;
+}
+// Which photos to ask about: the ones it is least sure of, spread over the folders it guessed (so every folder gets a look).
+export function pickToTeach(preds, taught, n = 24) {
+  const by = new Map();
+  for (const p of preds.filter(p => !taught.has(p.id)).sort((a, b) => a.margin - b.margin)) (by.get(p.cat) || by.set(p.cat, []).get(p.cat)).push(p);
+  const lists = [...by.values()].sort((a, b) => a[0].margin - b[0].margin), out = [];
+  for (let r = 0; out.length < n && lists.some(l => l.length > r); r++) for (const l of lists) if (l[r] && out.length < n) out.push(l[r]);
+  return out;
 }
 
 /* ---------- perceptual hash (same recipe as imagehash.phash: 32x32 grey, DCT, top-left 8x8, median) ---------- */

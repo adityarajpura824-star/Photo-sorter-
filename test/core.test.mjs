@@ -159,3 +159,63 @@ test("number formats", () => {
   assert.equal(roughly(20), "under a minute");
   assert.equal(roughly(300), "about 5 min");
 });
+
+/* ---------- recognising what a photo is about ---------- */
+import { clipPrompts, isScreenCapture, candidates, trainHead, classifyVec, pickToTeach, DEFAULT_CATEGORIES as DEF } from "../www/js/core.js";
+
+test("clipPrompts: built-in folders use their short prompt set until the rule is changed", () => {
+  const food = DEF.find(c => c.key === "food");
+  assert.ok(clipPrompts(food).length >= 3 && clipPrompts(food).every(p => p.length < 70));
+  assert.deepEqual(clipPrompts({ ...food, rule: "street food stalls" }), ["a photo of street food stalls", "a picture of street food stalls"]);
+  assert.match(clipPrompts({ key: "x", kind: "video", label: "Pets", rule: "my dog" })[0], /^a frame from a video of my dog/);
+});
+test("isScreenCapture: reads the file name and its folder", () => {
+  assert.ok(isScreenCapture("Screenshot_20240101-101010.png", "Pictures/Screenshots/"));
+  assert.ok(isScreenCapture("Screen_Recording_2024.mp4", "Movies/"));
+  assert.ok(isScreenCapture("a.mp4", "DCIM/ScreenRecorder/"));
+  assert.ok(!isScreenCapture("IMG_2024.jpg", "DCIM/Camera/"));
+});
+test("candidates: screenshots may only go to screen folders, other files to any folder of their kind", () => {
+  const names = idx => idx.map(i => DEF[i].key);
+  assert.deepEqual(names(candidates(DEF, "photo", true)), ["docs", "memes", "screenshots"]);
+  assert.equal(candidates(DEF, "photo", false).length, 10);
+  assert.deepEqual(names(candidates(DEF, "video", true)), ["vscreen"]);
+  assert.deepEqual(names(candidates(DEF.filter(c => c.kind === "photo").concat(DEF.filter(c => c.kind === "video" && c.key !== "vscreen")), "video", true)).length, 3); // no screen folder left: any video folder
+});
+
+// a made-up image model: folders share a lot, the text vectors are poorly aligned and one vague folder attracts everything
+function world(seed, D = 64, K = 8) {
+  let a = seed >>> 0; const r = () => { a = (a + 0x6d2b79f5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const g = () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r()), rv = () => Array.from({ length: D }, g);
+  const unit = v => { const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1; return Float64Array.from(v, x => x / n); };
+  const mu = unit(rv()), spec = Array.from({ length: K }, () => unit(rv()));
+  const C = spec.map(s => unit(Array.from(s, (x, i) => x * 0.6 + mu[i] * 0.8)));
+  const T = spec.map(s => { const n = unit(rv()); return unit(Array.from(s, (x, i) => x * 0.35 + mu[i] * 0.55 + n[i] * 0.76)); });
+  T[K - 1] = unit(Array.from(mu, (x, i) => x * 0.95 + rv()[i] * 0.05));
+  return { T, K, draw: k => { const n = rv(); return unit(Array.from(C[k], (x, i) => x + (0.9 * n[i]) / Math.sqrt(D))); } };
+}
+const accuracy = (W, w, which) => { let ok = 0, t = 0; const cand = [...Array(w.K).keys()]; for (const k of which) for (let j = 0; j < 40; j++) { ok += classifyVec(w.draw(k), W, cand).i === k; t++; } return ok / t; };
+
+test("teaching: a few examples per folder lift accuracy a lot, and folders without examples do not get worse", () => {
+  let zero = 0, taught = 0, zeroRest = 0, partRest = 0; const runs = 5;
+  for (let s = 1; s <= runs; s++) {
+    const w = world(s * 13), cand = [...Array(w.K).keys()], ex = [];
+    for (let k = 0; k < w.K; k++) for (let j = 0; j < 5; j++) ex.push({ vec: w.draw(k), i: k, cand });
+    zero += accuracy(w.T, w, cand); taught += accuracy(trainHead(w.T, ex), w, cand);
+    zeroRest += accuracy(w.T, w, [4, 5, 6]); partRest += accuracy(trainHead(w.T, ex.filter(e => e.i < 4)), w, [4, 5, 6]);
+  }
+  assert.ok(taught / runs > zero / runs + 0.2, `zero-shot ${zero / runs}, taught ${taught / runs}`);
+  assert.ok(partRest / runs >= zeroRest / runs - 0.05, `untaught folders ${zeroRest / runs} -> ${partRest / runs}`);
+});
+test("teaching: no examples changes nothing; classifyVec reports confidence and margin", () => {
+  const w = world(3), cand = [0, 1, 2], v = w.draw(1);
+  const W = trainHead(w.T, []);
+  assert.deepEqual(Array.from(W[2]), Array.from(w.T[2]));
+  const r = classifyVec(v, w.T, cand);
+  assert.ok(cand.includes(r.i) && r.confidence > 0 && r.confidence <= 1 && r.margin >= 0 && r.margin <= r.confidence);
+});
+test("pickToTeach: least sure first, spread across the guessed folders, skips photos already taught", () => {
+  const preds = [{ id: 1, cat: "a", margin: 0.9 }, { id: 2, cat: "a", margin: 0.1 }, { id: 3, cat: "a", margin: 0.2 }, { id: 4, cat: "b", margin: 0.5 }, { id: 5, cat: "b", margin: 0.05 }, { id: 6, cat: "c", margin: 0.7 }];
+  assert.deepEqual(pickToTeach(preds, new Set(), 4).map(p => p.id), [5, 2, 6, 4]);
+  assert.deepEqual(pickToTeach(preds, new Set([5, 2]), 3).map(p => p.id), [3, 4, 6]);
+});

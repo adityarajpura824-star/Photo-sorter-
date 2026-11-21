@@ -10,14 +10,13 @@ export const hasLibrary = isNative;
 export async function access() { return !!(await P().requestAccess()).granted; }
 export const openSettings = () => P().openSettings();
 
-// Every photo, then every video, as file-like items: { native, kind, uri, name, type, size, lastModified, w, h, duration }.
-// `skip` is our own output folder under Documents, so a second sort never picks up its own copies.
-export async function list(skip, onCount = () => {}) {
+// Every photo, then every video, as file-like items: { native, kind, uri, name, type, size, lastModified, rel, w, h, duration }.
+export async function list(onCount = () => {}) {
   const out = [];
   for (const kind of ["photo", "video"]) {
     for (let offset = 0; ;) {
-      const { items } = await P().list({ kind, offset, limit: PAGE, skip });
-      for (const m of items) out.push({ native: true, kind, uri: m.uri, name: m.name, type: m.type, size: m.size, lastModified: m.taken, w: m.w, h: m.h, duration: m.duration });
+      const { items } = await P().list({ kind, offset, limit: PAGE });
+      for (const m of items) out.push({ native: true, kind, uri: m.uri, name: m.name, type: m.type, size: m.size, lastModified: m.taken, rel: m.rel, w: m.w, h: m.h, duration: m.duration });
       offset += items.length; onCount(out.length);
       if (items.length < PAGE) break;
     }
@@ -30,4 +29,11 @@ export async function thumb(file, px = 300) { // -> JPEG Blob (a video gives one
   return (await fetch("data:image/jpeg;base64," + data)).blob();
 }
 export const sha = async file => (await P().sha({ uri: file.uri })).sha;
-export const copy = (file, path) => P().copy({ uri: file.uri, path }); // path is relative to Documents
+// Moves photos and videos into other gallery folders (no copies). moves: [{ uri, to: "Pictures/Photo Sorter/Food/", name }].
+// Android asks the person to allow each batch once; the promise rejects with "denied" if they say no.
+// -> { moved: [uri], failed: [uri] }
+export async function move(moves) {
+  const r = await P().move({ moves });
+  if (r.denied) throw new Error("denied");
+  return r;
+}

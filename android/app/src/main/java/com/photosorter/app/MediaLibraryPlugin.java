@@ -1,20 +1,26 @@
 package com.photosorter.app;
 
 import android.Manifest;
+import android.app.Activity;
+import android.app.PendingIntent;
 import android.content.ContentResolver;
 import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.Size;
+
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.IntentSenderRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -22,28 +28,29 @@ import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import org.json.JSONObject;
+
 /**
- * Lets the page read the phone's whole gallery without a file picker:
+ * Lets the page work with the phone's whole gallery without a file picker:
  * permission, a list of every photo and video, a small preview of each, a fingerprint of each,
- * and a copy of each into Documents. Originals are only ever read.
- * Needs Android 10 or newer (minSdk 29).
+ * and moving them into other gallery folders (Android asks the person to allow each batch). Nothing is copied.
+ * Needs Android 11 or newer (minSdk 30).
  */
 @CapacitorPlugin(
     name = "MediaLibrary",
@@ -92,7 +99,7 @@ public class MediaLibraryPlugin extends Plugin {
         call.resolve();
     }
 
-    /** One page of the library. kind = "photo" | "video"; skip = a folder (under Documents) to leave out, like our own output. */
+    /** One page of the library. kind = "photo" | "video". */
     @PluginMethod
     public void list(final PluginCall call) {
         pool.execute(new Runnable() {
@@ -102,22 +109,15 @@ public class MediaLibraryPlugin extends Plugin {
                     boolean video = "video".equals(call.getString("kind", "photo"));
                     int offset = call.getInt("offset", 0);
                     int limit = call.getInt("limit", 1500);
-                    String skip = call.getString("skip", "");
                     Uri base = video ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
 
                     String[] cols = video
-                        ? new String[] { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT, MediaStore.MediaColumns.DURATION }
-                        : new String[] { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT };
+                        ? new String[] { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT, MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.DURATION }
+                        : new String[] { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT, MediaStore.MediaColumns.RELATIVE_PATH };
 
                     String where = MediaStore.MediaColumns.SIZE + " > 0";
-                    String[] args = null;
-                    if (!skip.isEmpty()) {
-                        where += " AND (" + MediaStore.MediaColumns.RELATIVE_PATH + " IS NULL OR " + MediaStore.MediaColumns.RELATIVE_PATH + " NOT LIKE ?)";
-                        args = new String[] { "Documents/" + skip + "/%" };
-                    }
                     Bundle q = new Bundle();
                     q.putString(ContentResolver.QUERY_ARG_SQL_SELECTION, where);
-                    if (args != null) q.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args);
                     q.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, MediaStore.MediaColumns._ID + " ASC");
                     q.putInt(ContentResolver.QUERY_ARG_LIMIT, limit);
                     q.putInt(ContentResolver.QUERY_ARG_OFFSET, offset);
@@ -134,7 +134,8 @@ public class MediaLibraryPlugin extends Plugin {
                             m.put("taken", taken > 0 ? taken : c.getLong(5) * 1000L);
                             m.put("w", c.isNull(6) ? 0 : c.getInt(6));
                             m.put("h", c.isNull(7) ? 0 : c.getInt(7));
-                            if (video) m.put("duration", c.isNull(8) ? 0 : c.getLong(8) / 1000.0);
+                            m.put("rel", c.isNull(8) ? "" : c.getString(8));
+                            if (video) m.put("duration", c.isNull(9) ? 0 : c.getLong(9) / 1000.0);
                             items.put(m);
                         }
                     }
@@ -220,36 +221,83 @@ public class MediaLibraryPlugin extends Plugin {
         }
     }
 
-    /** Copies the original into Documents/<path>. The original is only read. */
+    /**
+     * Moves files into other gallery folders by changing their folder in MediaStore: instant, no copy, nothing extra stored.
+     * Android shows its own "Allow Photo Sorter to modify these items?" box once per call, so the page sends batches.
+     * moves = [{ uri, to: "Pictures/Photo Sorter/Food/", name }]  ->  { moved: [{ uri, name }], failed: [uri] } or { denied: true }
+     */
     @PluginMethod
-    public void copy(final PluginCall call) {
+    public void move(PluginCall call) {
+        try {
+            JSArray moves = call.getArray("moves");
+            List<Uri> uris = new ArrayList<>();
+            for (int i = 0; i < moves.length(); i++) uris.add(Uri.parse(moves.getJSONObject(i).getString("uri")));
+            if (uris.isEmpty()) {
+                JSObject r = new JSObject();
+                r.put("moved", new JSArray());
+                r.put("failed", new JSArray());
+                call.resolve(r);
+                return;
+            }
+            PendingIntent pi = MediaStore.createWriteRequest(getContext().getContentResolver(), uris);
+            Intent intent = new Intent(ActivityResultContracts.StartIntentSenderForResult.ACTION_INTENT_SENDER_REQUEST)
+                .putExtra(ActivityResultContracts.StartIntentSenderForResult.EXTRA_INTENT_SENDER_REQUEST, new IntentSenderRequest.Builder(pi).build());
+            startActivityForResult(call, intent, "moveAllowed");
+        } catch (Exception e) {
+            call.reject("Could not ask Android for permission: " + e.getMessage());
+        }
+    }
+
+    @ActivityCallback
+    private void moveAllowed(final PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK) {
+            JSObject r = new JSObject();
+            r.put("denied", true);
+            call.resolve(r);
+            return;
+        }
         pool.execute(new Runnable() {
             @Override
             public void run() {
-                File dest = null;
                 try {
-                    Uri uri = Uri.parse(call.getString("uri", ""));
-                    String path = call.getString("path", "");
-                    if (path.isEmpty() || path.startsWith("/") || path.contains("..")) throw new IllegalArgumentException("bad path");
-                    dest = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), path);
-                    File dir = dest.getParentFile();
-                    if (dir != null) dir.mkdirs();
-                    long total = 0;
-                    try (InputStream in = getContext().getContentResolver().openInputStream(uri);
-                         OutputStream out = new FileOutputStream(dest)) {
-                        byte[] buf = new byte[256 * 1024];
-                        int n;
-                        while ((n = in.read(buf)) > 0) {
-                            out.write(buf, 0, n);
-                            total += n;
+                    ContentResolver cr = getContext().getContentResolver();
+                    JSArray moves = call.getArray("moves"), moved = new JSArray(), failed = new JSArray();
+                    for (int i = 0; i < moves.length(); i++) {
+                        JSONObject m = moves.getJSONObject(i);
+                        String uri = m.getString("uri"), name = m.getString("name");
+                        try {
+                            ContentValues v = new ContentValues();
+                            v.put(MediaStore.MediaColumns.RELATIVE_PATH, m.getString("to"));
+                            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                            int n;
+                            try {
+                                n = cr.update(Uri.parse(uri), v, null, null);
+                            } catch (Exception taken) { // a file with that name is already in that folder: add the id to the name
+                                int dot = name.lastIndexOf('.');
+                                String id = Uri.parse(uri).getLastPathSegment();
+                                name = dot < 0 ? name + "_" + id : name.substring(0, dot) + "_" + id + name.substring(dot);
+                                v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                                n = cr.update(Uri.parse(uri), v, null, null);
+                            }
+                            if (n > 0) {
+                                JSObject ok = new JSObject();
+                                ok.put("uri", uri);
+                                ok.put("name", name);
+                                moved.put(ok);
+                            } else {
+                                failed.put(uri);
+                            }
+                        } catch (Exception e) {
+                            failed.put(uri);
                         }
                     }
                     JSObject r = new JSObject();
-                    r.put("bytes", total);
+                    r.put("moved", moved);
+                    r.put("failed", failed);
                     call.resolve(r);
                 } catch (Exception e) {
-                    if (dest != null) dest.delete();
-                    call.reject("Could not copy: " + e.getMessage());
+                    call.reject("Could not move: " + e.getMessage());
                 }
             }
         });

@@ -1,7 +1,7 @@
 // Saves results on the phone (IndexedDB) so closing the app does not lose them. Best effort: every call is safe to fail.
 const open = () => new Promise((res, rej) => {
-  const q = indexedDB.open("photo-sorter", 1);
-  q.onupgradeneeded = () => { for (const s of ["kv", "thumbs", "minis"]) q.result.createObjectStore(s); };
+  const q = indexedDB.open("photo-sorter", 2);
+  q.onupgradeneeded = () => { for (const s of ["kv", "thumbs", "minis", "emb"]) if (!q.result.objectStoreNames.contains(s)) q.result.createObjectStore(s); }; // emb: what the image model saw in each photo, kept so re-sorting needs no rescan
   q.onsuccess = () => res(q.result);
   q.onerror = () => rej(q.error);
 });

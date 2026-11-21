@@ -3,8 +3,9 @@
 //   claude  contact sheets of 30 previews sent to the Claude API with your own key (port of label_claude.py)
 //   jev     TypeSafe's Jev image model, one question per file, your own key (port of label_jev.py)
 // Each calls onResult(rec, value) as answers arrive, so the dashboard can fly photos into folders live.
-import { claudeBatches, claudePrompt, parseLabelJson, sheetTag, softmaxPick } from "./core.js";
+import { candidates, classifyVec, claudeBatches, claudePrompt, clipPrompts, meanUnit, parseLabelJson, sheetTag, trainHead } from "./core.js";
 import { pool } from "./scan.js";
+import * as store from "./store.js";
 import { isNative, plugin } from "./platform.js";
 
 export class FatalError extends Error {}
@@ -135,23 +136,46 @@ async function loadClip(onStatus) {
     throw new FatalError(`The on-device model could not be loaded (${e.message || e}). It needs the internet once to download; after that it works offline. Or pick Claude or Jev in Settings.`);
   }
 }
-export async function labelDevice({ recs, cats, getThumb, onResult, onProgress, onStatus }) {
-  const m = await loadClip(onStatus);
+const unit = a => { let n = 0; for (const x of a) n += x * x; n = Math.sqrt(n) || 1; return Float32Array.from(a, x => x / n); };
+
+// One unit vector per folder, from its prompt set. Prompt vectors are kept, so the model is only needed for new prompts.
+async function textVectors(cats, onStatus) {
+  const cache = (await store.get("kv", "txt")) || {}, miss = [...new Set(cats.flatMap(clipPrompts))].filter(p => !cache[p]);
+  if (miss.length) {
+    const m = await loadClip(onStatus);
+    const { text_embeds } = await m.text(m.tokenizer(miss, { padding: true, truncation: true }));
+    text_embeds.normalize().tolist().forEach((v, i) => (cache[miss[i]] = v));
+    await store.put("kv", "txt", cache);
+  }
+  return cats.map(c => meanUnit(clipPrompts(c).map(p => cache[p])));
+}
+// The folder vectors, nudged toward the photos you taught it (examples: Map(sha -> folder key)).
+async function learnedHead(T, cats, examples) {
+  const ex = [];
+  for (const [sha, key] of examples) {
+    const i = cats.findIndex(c => c.key === key), vec = i < 0 ? null : await store.get("emb", sha);
+    if (vec) ex.push({ vec, i, cand: candidates(cats, cats[i].kind, false) });
+  }
+  return trainHead(T, ex);
+}
+// Labels recs with the on-device image model. Each photo is looked at once (the result is kept in the "emb" store),
+// so with onlyCached the folders can change or be taught and everything is re-sorted in seconds, with no model and no rescan.
+export async function labelDevice({ recs, cats, getThumb, onResult, onProgress, onStatus, examples = new Map(), onlyCached = false }) {
+  const T = await textVectors(cats, onStatus);
+  const W = await learnedHead(T, cats, examples);
   onStatus({ ready: true });
-  const prompts = cats.map(c => (c.kind === "video" ? "a frame from a video of " : "a photo of ") + c.rule);
-  const { text_embeds } = await m.text(m.tokenizer(prompts, { padding: true, truncation: true }));
-  const textVecs = text_embeds.normalize().tolist();
-  const idx = { photo: [], video: [] };
-  cats.forEach((c, i) => idx[c.kind].push(i));
   let n = 0;
   onProgress(0, recs.length);
   for (const r of recs) {
     try {
-      const image = await m.T.RawImage.fromBlob(await getThumb(r.id));
-      const { image_embeds } = await m.vision(await m.processor(image));
-      const v = image_embeds.normalize().tolist()[0];
-      const list = idx[r.kind], sims = list.map(i => textVecs[i].reduce((s, x, k) => s + x * v[k], 0));
-      onResult(r, softmaxPick(sims, list.map(i => cats[i].key)).key);
+      let v = r.sha && (await store.get("emb", r.sha));
+      if (!v && !onlyCached && !r.error) {
+        const m = await loadClip(onStatus);
+        const { image_embeds } = await m.vision(await m.processor(await m.T.RawImage.fromBlob(await getThumb(r.id))));
+        v = unit(image_embeds.data);
+        await store.put("emb", r.sha, v);
+      }
+      if (v) { const c = classifyVec(v, W, candidates(cats, r.kind, r.screen)); onResult(r, cats[c.i].key, c); }
     } catch { /* this file gets no label and lands in the catch-all folder */ }
     onProgress(++n, recs.length);
     if (n % 5 === 0) await sleep(0);

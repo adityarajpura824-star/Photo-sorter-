@@ -2,14 +2,14 @@
    Screens: setup (one Sort button) -> running (live sort) -> done (results, replay).  ?demo opens the fake camera roll. */
 import {
   DEFAULT_CATEGORIES, TOKENS_PER_FILE, SHEET_TOKENS, SHEET_SIZE, fmt, size, mmss, roughly, kindOf, validateCategories, uniqueKey, folderName, fallbackKey,
-  catsFingerprint, findDuplicates, resolveLabels, planOutput, folderCounts, overallProgress, secondsLeft, sampleFiles,
+  catsFingerprint, findDuplicates, resolveLabels, planOutput, folderCounts, overallProgress, secondsLeft, sampleFiles, pickToTeach,
 } from "./core.js";
 import * as store from "./store.js";
 import { scanFile, pool, pixelsDiffer, peek } from "./scan.js";
 import { labelDevice, labelClaude, labelJev, FatalError } from "./label.js";
-import { saveAll, viewBase, moveFile, rewriteCsvs, cleanDest } from "./fsout.js";
+import { cleanDest, writeCsvs } from "./fsout.js";
 import { makeDemo } from "./demo.js";
-import { isNative } from "./platform.js";
+import { isNative, cap } from "./platform.js";
 import * as library from "./library.js";
 
 const params = new URLSearchParams(location.search);
@@ -78,7 +78,10 @@ let items = [], byId = new Map(), labels = {}, dupes = [], dupeIds = new Set(), 
 let aiMap = {}, jevMap = {};
 const files = new Map();            // id -> File, only while the app stays open
 let thumbMem = new Map(), minis = new Map(); // demo previews live in memory; real ones in IndexedDB
-let out = { base: null, rels: {}, view: null, failed: [] };
+let margins = {};                   // photo id -> how sure the on-device model was (small = unsure)
+let examples = {};                  // photo sha -> folder key: the photos you taught it (kept between sorts)
+let imp = null;                     // what Import moved: { at, csv, moves: { uri: { from: { rel, name }, to: { rel, name } } } }
+const BATCH = 1000;                 // Android asks for permission once per batch
 const pick = { files: [], sum: null, peek: [], advanced: false };
 const job = { running: false, phases: [], phase: null, done: 0, total: 0, started: 0, phaseStarted: 0, note: "", error: null, log: [] };
 
@@ -122,7 +125,7 @@ const effectiveCount = () => (settings.sample ? Math.min(200, summary().total) :
 function setupView() {
   const box = el("div", { class: "setup rise" });
   const gallery = library.hasLibrary();
-  box.append(el("div", {}, el("h1", {}, "Sort my camera roll"), el("p", { class: "sub" }, (gallery ? "Photo Sorter looks through every photo and video on your phone by itself. " : "Pick your photos and videos. ") + "Nothing is moved, renamed or deleted. Sorted copies are saved on your phone.")));
+  box.append(el("div", {}, el("h1", {}, "Sort my camera roll"), el("p", { class: "sub" }, (gallery ? "Photo Sorter looks through every photo and video on your phone by itself. " : "Pick your photos and videos. ") + "Sorting only makes a plan. Nothing on your phone changes until you press Import, and Import can be undone.")));
   if (!pick.files.length) {
     if (gallery) {
       box.append(el("button", { class: "btn solid big", onclick: sortGallery }, icon("play"), "Sort all my photos"));
@@ -132,7 +135,6 @@ function setupView() {
       box.append(el("p", { class: "hint" }, "Tip: in the picker, open a folder such as Camera and use Select all."));
     }
     if (lastLibrary) box.append(el("button", { class: "btn big", onclick: restoreLast }, icon("check"), `View last sort (${fmt(lastLibrary.recs.length)} files)`));
-    if (gallery) box.append(el("div", { class: "row", style: "justify-content:center" }, el("button", { class: "linkish", onclick: () => $("picker").click() }, "Or choose photos myself")));
   } else {
     const s = summary();
     box.append(el("div", { class: "card picked" },
@@ -188,7 +190,7 @@ function settingsBox() {
     opt("jev", "Jev by TypeSafe ", "Fast image model, billed per file (about " + fmt(TOKENS_PER_FILE) + " tokens each). Sends a 280px preview of each file.", paid, [keyField("jevKey", "Jev key", "Jev key"), el("small", {}, "The key stays on this phone.")]),
     el("h4", {}, "More"),
     el("label", { class: "check-row" }, el("input", { type: "checkbox", checked: settings.sample, onchange: e => { settings.sample = e.target.checked; saveSet(); pick.sum = null; renderApp(); } }), "Try 200 random files first"),
-    el("div", {}, el("label", { class: "meta", for: "dest" }, "Save sorted copies in Documents / …"),
+    el("div", {}, el("label", { class: "meta", for: "dest" }, "Album name (made inside Pictures and Movies)"),
       el("input", { id: "dest", class: "field", value: settings.dest, placeholder: "Photo Sorter", oninput: e => { settings.dest = e.target.value; saveSet(); } })));
 }
 
@@ -202,7 +204,7 @@ function boardView() {
     el("div", { id: "panel" }),
     el("section", { class: "kpis" },
       kpi("k-checked", "Files checked"), kpi("k-photos", "Photos sorted"), kpi("k-videos", "Videos sorted"),
-      el("div", { class: "kpi" }, el("h3", {}, "Folders made"), el("b", {}, el("span", { id: "k-folders" }, "0"), el("span", { class: "of" }, " / ", el("span", { id: "k-ftotal" }, "0"))), el("small", {}, " ")),
+      el("div", { class: "kpi" }, el("h3", {}, "Folders"), el("b", {}, el("span", { id: "k-folders" }, "0"), el("span", { class: "of" }, " / ", el("span", { id: "k-ftotal" }, "0"))), el("small", {}, " ")),
       kpi("k-dupes", "Duplicates", "to review"), kpi("k-saved", "Space to save", "if deleted")),
     el("div", { class: "progress" }, el("i", { id: "bar" })),
     el("div", { class: "sec" }, el("h3", {}, "Photos"), el("em", { id: "pcount" }, "0")), el("div", { class: "folders", id: "photos" }),
@@ -321,7 +323,6 @@ function showDone(withConfetti) {
 function celebrate() {
   run = "idle"; finishing = false; mode = "done"; document.body.dataset.mode = mode;
   renderPanel(); showDone(true); persist();
-  if (out.failed.length) toast(`${fmt(out.failed.length)} files could not be copied. See "My files".`);
 }
 function replay() {
   document.body.classList.remove("is-done");
@@ -368,18 +369,36 @@ function tick(now) {
 }
 
 /* ---------- the panel under the stage: run progress, or what to do next ---------- */
-const NAMES = { scan: "Looking at every file", dupes: "Finding duplicates", apply: "Copying into folders" };
+const NAMES = { scan: "Looking at every file", dupes: "Finding duplicates" };
 const phaseName = p => (p === "label" ? { device: "Sorting on this phone", claude: "Claude is sorting your photos", jev: "Jev is sorting your photos" }[settings.labeler] : NAMES[p]) || "Getting ready";
 let shownPhase = null;
+const where = it => imp?.moves[it.uri]?.to.rel || it.rel || ""; // the album a file is in right now
+const canImport = () => !demo && isNative() && items.some(i => i.uri);
+function wanted() { // where every file should be: [{ it, to, name }]
+  const base = cleanDest(settings.dest);
+  return planOutput(items, labels, cats, dupes).filter(p => byId.get(p.id).uri).map(p => {
+    const it = byId.get(p.id), album = p.folder === "_Review/duplicates" ? "Duplicates to review" : p.folder;
+    return { it, to: `${it.kind === "video" ? "Movies" : "Pictures"}/${base}/${album}/`, name: p.rel.slice(p.rel.lastIndexOf("/") + 1) };
+  });
+}
+const pending = () => wanted().filter(w => where(w.it).toLowerCase() !== w.to.toLowerCase());
 function renderPanel() {
   const panel = $("panel"); if (!panel) return;
   shownPhase = job.phase;
   if (mode === "running") return panel.replaceChildren(runCard());
-  panel.replaceChildren(el("div", { class: "actions rise" },
-    el("button", { class: "btn solid", onclick: replay }, icon("play"), "Replay"),
-    el("button", { class: "btn", onclick: newSort }, icon("plus"), "New sort"),
-    el("button", { class: "btn", onclick: () => whereDialog() }, icon("folder"), "My files"),
-    el("button", { class: "btn", onclick: openFolders }, icon("pencil"), "Edit folders")));
+  const can = canImport(), todo = can ? pending() : [], made = imp ? Object.keys(imp.moves).length : 0, base = cleanDest(settings.dest);
+  const note = demo ? "This is the demo. Moving photos into your gallery only works in the Android app."
+    : !can ? "" : !made ? "Nothing on your phone has changed yet. Tap a folder to look inside and fix mistakes, then press Import."
+    : todo.length ? `${fmt(todo.length)} files are not in their new album yet.` : `Done. Your gallery now has albums under Pictures/${base} and Movies/${base}.`;
+  panel.replaceChildren(el("div", { class: "stack rise" },
+    note ? el("p", { class: "note", id: "panelnote" }, note) : null,
+    can && (todo.length || !made) ? el("button", { class: "btn solid big", id: "importbtn", onclick: openImport }, icon("folder"), made ? `Apply ${fmt(todo.length)} changes` : `Import ${fmt(todo.length)} files into the gallery`) : null,
+    can && made ? el("button", { class: "btn big", id: "undobtn", onclick: openUndo }, icon("left"), "Undo import") : null,
+    el("div", { class: "actions" },
+      settings.labeler === "device" && !demo ? el("button", { class: "btn", id: "teachbtn", onclick: openTeach }, icon("check"), "Teach it") : null,
+      el("button", { class: "btn", onclick: openFolders }, icon("pencil"), "Edit folders"),
+      el("button", { class: "btn", onclick: replay }, icon("play"), "Replay"),
+      el("button", { class: "btn", onclick: newSort }, icon("plus"), "New sort"))));
   paintIcons(panel);
 }
 function runCard() {
@@ -387,7 +406,7 @@ function runCard() {
   const steps = job.phases.map(p => {
     const idx = job.phases.indexOf(p), cur = job.phases.indexOf(job.phase);
     const st = job.phase === "done" || idx < cur ? "ok" : p === job.phase ? (failed ? "bad" : "now") : "";
-    return el("li", { class: st }, st === "ok" ? icon("check") : el("i", {}), { scan: "Scan", dupes: "Duplicates", label: "Label", apply: "Folders" }[p]);
+    return el("li", { class: st }, st === "ok" ? icon("check") : el("i", {}), { scan: "Scan", dupes: "Duplicates", label: "Label" }[p]);
   });
   const c = el("div", { class: "card", id: "runcard" },
     el("div", { class: "run-h" }, el("b", { id: "runname" }, failed ? "Something went wrong" : phaseName(job.phase)), el("span", { class: "num", id: "timer" })),
@@ -434,7 +453,7 @@ async function confirmPaid(n, todo) {
 
 async function clearLibrary() {
   files.clear(); thumbMem = new Map(); minis = new Map(); clearUrls();
-  items = []; byId = new Map(); labels = {}; dupes = []; dupeIds = new Set(); overrides = {}; aiMap = {}; jevMap = {};
+  items = []; byId = new Map(); labels = {}; dupes = []; dupeIds = new Set(); overrides = {}; aiMap = {}; jevMap = {}; margins = {};
   queue.length = 0; queued.clear(); flown.clear();
   await Promise.all([store.clear("thumbs"), store.clear("minis"), store.put("kv", "overrides", {})]);
 }
@@ -452,7 +471,7 @@ async function sortGallery() {
   setPill("busy", "Opening your gallery");
   try {
     if (!(await library.access())) { setPill(null, ""); return needAccess("Without access to your photos and videos there is nothing to sort."); }
-    const found = await library.list(cleanDest(settings.dest), n => setPill("busy", `Reading your gallery · ${fmt(n)}`));
+    const found = await library.list(n => setPill("busy", `Reading your gallery · ${fmt(n)}`));
     if (!found.length) { setPill(null, ""); return needAccess("No photos or videos were found. If you chose to share only some photos, Photo Sorter can only see those."); }
     pick.files = found; pick.sum = null; pick.peek = await peek(found, 24);
   } catch (e) { setPill(null, ""); return toast(`Could not read your gallery: ${e.message || e}`); }
@@ -465,11 +484,9 @@ async function startSorting() {
   const chosen = settings.sample ? sampleFiles(pick.files, 200) : pick.files;
   if (!chosen.length) return toast("Choose your photos first.");
   if (!(await confirmPaid(chosen.length))) return;
-  const previous = out.base === cleanDest(settings.dest) ? Object.values(out.rels) : []; // only copies this tool made last time get replaced
   demo = false;
   await clearLibrary();
-  Object.assign(job, { running: true, phases: ["scan", "dupes", "label", "apply"], error: null, note: "", log: [], started: Date.now() });
-  out = { base: null, rels: {}, view: null, failed: [] };
+  Object.assign(job, { running: true, phases: ["scan", "dupes", "label"], error: null, note: "", log: [], started: Date.now() });
   mode = "running"; run = "live"; finishing = false;
   document.body.classList.remove("is-done");
   phase("scan"); renderApp(); setPill("busy", phaseName("scan"));
@@ -494,8 +511,7 @@ async function startSorting() {
     dupeIds = new Set(dupes.flatMap(g => g.dupes)); items.forEach(it => (it.dupe = dupeIds.has(it.id)));
     // 3. labels
     phase("label"); await runLabel();
-    // 4. folders
-    phase("apply"); await runApply(previous);
+    resolve();
     job.phase = "done"; job.running = false;
     items.forEach(it => { it.cat = labels[it.id]; if (!flown.has(it.id) && !queued.has(it)) { queued.add(it); queue.push(it); } });
     finishing = true; setPill("busy", "Almost there");
@@ -507,24 +523,24 @@ async function startSorting() {
 }
 
 async function runLabel() {
-  const lab = settings.labeler, fp = catsFingerprint(cats), cacheKey = "labels-" + lab;
-  const saved = await store.get("kv", cacheKey), known = saved && saved.fp === fp ? saved.map : {};
-  aiMap = {}; jevMap = {};
+  const lab = settings.labeler, dev = lab === "device", fp = catsFingerprint(cats), cacheKey = "labels-" + lab;
+  const saved = dev ? null : await store.get("kv", cacheKey), known = saved && saved.fp === fp ? saved.map : {}; // the phone keeps what the model saw (embeddings) instead
+  aiMap = {}; jevMap = {}; margins = {};
   const live = (it, key) => { // the folder the photo flies to (a wrong-kind answer goes to the catch-all)
     it.cat = catBy[key] && catBy[key].kind === it.kind ? key : fallbackKey(cats, it.kind);
     if (!flown.has(it.id) && !queued.has(it)) { queued.add(it); queue.push(it); }
   };
-  const take = (it, v) => { if (lab === "jev") { jevMap[it.id] = v; if (v.confidence >= 0.7) live(it, v.key); } else { aiMap[it.id] = v; live(it, v); } };
+  const take = (it, v, c) => { if (lab === "jev") { jevMap[it.id] = v; if (v.confidence >= 0.7) live(it, v.key); } else { aiMap[it.id] = v; if (c) margins[it.id] = c.margin; live(it, v); } };
   const todo = [];
   for (const it of items) { const v = known[it.sha]; if (v == null || v.error) todo.push(it); else take(it, v); }
   let since = 0;
-  const saveCache = () => store.put("kv", cacheKey, { fp, map: known });
-  const onResult = (it, v) => { if (!v || v.error) return; known[it.sha] = v; take(it, v); if (++since >= 50) { since = 0; saveCache(); } };
+  const saveCache = () => !dev && store.put("kv", cacheKey, { fp, map: known });
+  const onResult = (it, v, c) => { if (!v || v.error) return; if (!dev) { known[it.sha] = v; if (++since >= 50) { since = 0; saveCache(); } } take(it, v, c); };
   const common = { recs: todo, cats, getThumb, onResult, onProgress: (d, t) => { job.done = d; job.total = t; } };
   let failed = [];
   try {
     if (todo.length) {
-      if (lab === "device") await labelDevice({ ...common, onStatus: s => { if (s.download != null) job.note = `Downloading the on-device model, one time only: ${Math.round(s.download * 100)}%`; if (s.ready) job.note = ""; } });
+      if (dev) await labelDevice({ ...common, examples: new Map(Object.entries(examples)), onStatus: s => { if (s.download != null) job.note = `Downloading the on-device model, one time only: ${Math.round(s.download * 100)}%`; if (s.ready) job.note = ""; } });
       else if (lab === "claude") failed = await labelClaude({ ...common, key: settings.claudeKey, model: settings.claudeModel || "claude-sonnet-5-5", onLog: l => job.log.push(l) });
       else await labelJev({ ...common, key: settings.jevKey });
     }
@@ -534,22 +550,16 @@ async function runLabel() {
   if (got < items.length) job.log.push("A few files could not be labelled; they go to the catch-all folders.");
 }
 
-async function runApply(previous) {
-  const r = resolveLabels(items, cats, aiMap, jevMap, overrides);
-  labels = r.labels; items.forEach(it => { it.cat = labels[it.id]; });
-  const plan = planOutput(items, labels, cats, dupes);
-  job.total = plan.length;
-  if (isNative()) {
-    const res = await saveAll({ dest: settings.dest, recs: items, plan, files, previous, onProgress: (d, t) => { job.done = d; job.total = t; } });
-    out = { base: res.base, rels: Object.fromEntries(res.ok.map(p => [p.id, p.rel])), view: await viewBase(res.base).catch(() => null), failed: res.failed };
-    if (res.failed.length && !res.ok.length) throw new Error(`Nothing could be saved to Documents/${res.base}. ${res.failed[0]}`);
-  } else { out = { base: null, rels: {}, view: null, failed: [] }; job.log.push("Preview mode: copies are only saved by the Android app."); }
+// Folders for every file, with your hand-moves winning. Nothing is saved anywhere: sorting only makes a plan.
+function resolve() {
+  labels = resolveLabels(items, cats, aiMap, jevMap, overrides).labels;
+  items.forEach(it => { it.cat = labels[it.id]; });
 }
 
 async function persist() {
   if (demo) return;
-  const recs = items.map(({ id, name, ext, kind, bytes, sha, w, h, duration, taken, error, phash }) => ({ id, name, ext, kind, bytes, sha, w, h, duration, taken, error, phash }));
-  await store.put("kv", "library", { recs, labels, dupes, out: { base: out.base, rels: out.rels, failed: out.failed }, savedAt: Date.now() });
+  const recs = items.map(({ id, name, ext, kind, bytes, sha, w, h, duration, taken, error, phash, uri, rel, screen }) => ({ id, name, ext, kind, bytes, sha, w, h, duration, taken, error, phash, uri, rel, screen }));
+  await store.put("kv", "library", { recs, labels, dupes, margins, savedAt: Date.now() });
   await store.put("kv", "overrides", overrides);
   await store.putMany("minis", [...minis]);
 }
@@ -559,8 +569,9 @@ async function restoreLast() {
   items = lib.recs.map(r => ({ ...r, cat: lib.labels[r.id], dupe: false })); byId = new Map(items.map(it => [it.id, it]));
   labels = lib.labels; dupes = lib.dupes; dupeIds = new Set(dupes.flatMap(g => g.dupes)); items.forEach(it => (it.dupe = dupeIds.has(it.id)));
   overrides = (await store.get("kv", "overrides")) || {}; minis = await store.getAll("minis"); thumbMem = new Map(); files.clear();
-  out = { base: lib.out.base, rels: lib.out.rels || {}, view: null, failed: lib.out.failed || [] };
-  if (out.base && isNative()) out.view = await viewBase(out.base).catch(() => null);
+  margins = lib.margins || {};
+  labels = Object.fromEntries(items.map(it => [it.id, catBy[labels[it.id]]?.kind === it.kind ? labels[it.id] : fallbackKey(cats, it.kind)])); // folders you deleted since fall back to the catch-all
+  items.forEach(it => { it.cat = labels[it.id]; });
   mode = "done"; renderApp(); sphereFromItems(); fillStatic(); showDone(false);
 }
 
@@ -570,7 +581,7 @@ async function startDemo() {
   demo = true; clearUrls(); files.clear();
   setCats(lib.cats); items = lib.recs.map(r => ({ ...r, cat: lib.labels[r.id], dupe: false })); byId = new Map(items.map(it => [it.id, it]));
   labels = lib.labels; dupes = lib.dupes; dupeIds = new Set(dupes.flatMap(g => g.dupes)); items.forEach(it => (it.dupe = dupeIds.has(it.id)));
-  thumbMem = lib.thumbs; minis = lib.minis; overrides = {}; out = { base: null, rels: {}, view: null, failed: [] };
+  thumbMem = lib.thumbs; minis = lib.minis; overrides = {}; margins = {};
   mode = "done"; renderApp(); sphereFromItems(); fillStatic(); showDone(false); setPill("live", "Sorted");
   if (params.has("auto") || !params.has("demo")) setTimeout(replay, 600);
 }
@@ -598,14 +609,14 @@ function dialog(title, body, foot, onClose) {
 }
 
 function whereDialog(folder) {
-  const base = out.base ? `Documents / ${out.base}` : null;
+  const base = cleanDest(settings.dest), made = imp && Object.keys(imp.moves).length;
   dialog("Where are my files", [
-    base ? el("div", { class: "card stack" },
-      el("p", {}, "Open the ", el("b", {}, "Files"), " app on your phone and go to:"),
-      el("p", { class: "mono" }, base + (folder ? ` / ${folder}` : "")),
-      el("p", { class: "meta" }, "Your originals were not touched. Each folder holds copies, duplicates are in _Review / duplicates, and sorted.csv and duplicates.csv list everything."))
-      : el("p", { class: "meta" }, demo ? "This is the demo, so nothing was saved." : "Nothing is saved yet. Sort first, then the copies appear in Documents on your phone."),
-    out.failed.length ? el("div", { style: "margin-top:12px" }, el("h4", {}, `${fmt(out.failed.length)} files could not be copied`), el("pre", { class: "log" }, out.failed.slice(0, 20).join("\n"))) : null,
+    made ? el("div", { class: "card stack" },
+      el("p", {}, "Open your ", el("b", {}, "Gallery"), " (or Google Photos) and look for the albums:"),
+      el("p", { class: "mono" }, `Pictures / ${base} / ${folder ? folderName(folder) : "…"}`),
+      el("p", { class: "mono" }, `Movies / ${base} / …`),
+      el("p", { class: "meta" }, "The photos were moved, not copied, so nothing is stored twice. Duplicates are in the album Duplicates to review: nothing was deleted." + (imp.csv ? ` sorted.csv and duplicates.csv in Documents / ${base} list where everything went.` : "")))
+      : el("p", { class: "meta" }, demo ? "This is the demo, so nothing was moved." : "Nothing has been moved yet. Press Import when the folders look right."),
   ]);
 }
 
@@ -622,11 +633,15 @@ function openFolders() { // edit the folders: names, emoji, rules, photo or vide
   }
   function render() { list.replaceChildren(el("h4", { style: "margin-top:0" }, "Photo folders"), ...draft.filter(c => c.kind === "photo").map(row), el("h4", {}, "Video folders"), ...draft.filter(c => c.kind === "video").map(row)); paintIcons(list); }
   const add = kind => () => { draft.push({ key: "", kind, label: "", emoji: kind === "photo" ? "📁" : "🎬", rule: "" }); render(); };
-  function saveIt() {
+  async function saveIt() {
     for (const c of draft) { if (!c.label.trim()) return toast("Every folder needs a name."); c.label = c.label.trim(); c.rule = (c.rule || "").trim() || c.label; if (!c.key) c.key = slugOf(c.label); }
     if (!saveCats(draft)) return;
-    closeAll(); if (mode === "setup") renderApp(); else { buildCards(); fillStatic(); showDone(false); }
-    if (mode === "done") toast("Saved. Press New sort and sort again so files can use the new folders.");
+    closeAll(); if (mode === "setup") return renderApp();
+    if (demo || settings.labeler !== "device") { buildCards(); fillStatic(); showDone(false); return toast("Saved. Press New sort and sort again so files can use the new folders."); }
+    setPill("busy", "Sorting into your folders"); // the phone already knows what is in every photo, so this takes seconds
+    try { const n = await relabelDevice(); toast(`Folders saved. ${fmt(n)} photos moved to a different folder.`); }
+    catch (e) { toast(`Could not re-sort: ${e.message || e}`); }
+    setPill("live", "Sorted");
   }
   render();
   dialog("Folders", [list, el("p", { class: "meta" }, "The rule is what the sorter reads, so describe each folder the way you'd explain it to a friend. Keep one photo and one video folder; the last of each kind catches everything else.")], [
@@ -653,11 +668,11 @@ function openFolder(c) {
   };
   more();
   dialog(`${c.emoji || "📁"} ${c.label} · ${fmt(all.length)}`, all.length ? grid : el("p", { class: "empty" }, "Nothing in this folder yet."),
-    out.base ? [el("button", { class: "btn", onclick: () => whereDialog(c.key === "_dupes" ? "_Review / duplicates" : folderName(c.label)) }, icon("folder"), "Where is this folder?")] : null);
+    imp ? [el("button", { class: "btn", onclick: () => whereDialog(c.key === "_dupes" ? "Duplicates to review" : c.label) }, icon("folder"), "Where is this album?")] : null);
 }
 
-function viewUrl(it) { // the saved copy if there is one, else the picked file (this session), else the preview
-  if (!demo && out.view && out.rels[it.id]) return out.view(out.rels[it.id]);
+function viewUrl(it) { // the real file in the gallery (Android app), else the picked file (this session), else the preview
+  if (!demo && it.uri) return cap().convertFileSrc(it.uri);
   const f = files.get(it.id); if (f && !demo && !f.native) return blobUrl("f" + it.id, f);
   return null;
 }
@@ -690,25 +705,127 @@ function lightbox(list, i) {
   paintIcons(box);
 }
 
-// A hand move: the saved copy is renamed into the new folder right away and the CSV files are rewritten.
+// A hand move only edits the plan (and teaches the model); the file itself moves when you press Import / Apply changes.
 async function moveItem(it, key) {
   if (!key || !catBy[key]) return;
   overrides[it.id] = key; labels[it.id] = key; it.cat = key; it.dupe = false; dupeIds.delete(it.id);
   dupes = dupes.map(g => ({ ...g, dupes: g.dupes.filter(d => d !== it.id) })).filter(g => g.dupes.length);
-  let failedMove = "";
-  const old = out.rels[it.id];
-  if (old && out.base && !demo) {
-    try {
-      const name = old.slice(old.lastIndexOf("/") + 1), folder = folderName(catBy[key].label), taken = new Set(Object.values(out.rels).map(r => r.toLowerCase()));
-      let rel = `${folder}/${name}`;
-      if (taken.has(rel.toLowerCase())) rel = `${folder}/${name.replace(/(\.[^.]*)?$/, `__${it.id}$1`)}`;
-      await moveFile(out.base, old, rel); out.rels[it.id] = rel;
-      const okItems = items.filter(r => out.rels[r.id]), dupeOf = new Map(dupes.flatMap(g => g.dupes.map(d => [d, g])));
-      await rewriteCsvs(out.base, okItems, okItems.map(r => ({ id: r.id, rel: out.rels[r.id], folder: out.rels[r.id].slice(0, out.rels[r.id].lastIndexOf("/")), keep: dupeOf.get(r.id)?.keep ?? null, type: dupeOf.get(r.id)?.type ?? null })));
-    } catch (e) { failedMove = `Moved in the app, but the saved copy could not be moved: ${e.message || e}`; }
+  if (settings.labeler === "device" && !demo && it.sha) { examples[it.sha] = key; store.put("kv", "examples", examples); }
+  toast(`Moved to ${catBy[key].label}.${demo ? " (Demo: nothing is saved.)" : imp ? " Press Apply changes to move it in your gallery." : ""}`);
+  fillStatic(); showDone(false); renderPanel(); persist();
+}
+
+/* ---------- teach it: you fix a few photos, the phone learns and re-sorts everything at once ---------- */
+async function relabelDevice() {
+  const before = labels; aiMap = {}; margins = {};
+  await labelDevice({ recs: items, cats, getThumb, examples: new Map(Object.entries(examples)), onlyCached: true, onStatus: () => {}, onProgress: () => {},
+    onResult: (it, key, c) => { aiMap[it.id] = key; margins[it.id] = c.margin; } });
+  resolve(); fillStatic(); showDone(false); renderPanel(); persist();
+  return items.filter(it => labels[it.id] !== before[it.id]).length;
+}
+function openTeach() {
+  if (mode !== "done" || demo) return;
+  const known = new Set(items.filter(i => examples[i.sha]).map(i => i.id)), taught = Object.keys(examples).length;
+  const preds = items.filter(i => !i.dupe && margins[i.id] != null).map(i => ({ id: i.id, cat: i.cat, margin: margins[i.id] }));
+  const sample = pickToTeach(preds, known, 24);
+  if (!sample.length && !taught) return toast("Nothing to teach yet. Sort some photos first.");
+  const choice = new Map(sample.map(p => [p.id, p.cat]));
+  const grid = !sample.length ? el("p", { class: "empty" }, "It is sure about every other photo, so there is nothing left to teach.") : el("div", { class: "teach" }, sample.map(p => {
+    const it = byId.get(p.id), img = el("img", { alt: it.name, src: EMPTY });
+    thumbUrl(it).then(u => (img.src = u));
+    const sel = el("select", { class: "select", "aria-label": `Folder for ${it.name}`, onchange: e => choice.set(it.id, e.target.value) },
+      cats.filter(c => c.kind === it.kind).map(c => el("option", { value: c.key, selected: c.key === p.cat }, `${c.emoji || ""} ${c.label}`)));
+    return el("div", { class: "tcard" }, img, sel);
+  }));
+  const go = async () => {
+    for (const [id, key] of choice) { const it = byId.get(id); examples[it.sha] = key; overrides[id] = key; }
+    store.put("kv", "examples", examples);
+    closeAll(); setPill("busy", "Learning from your corrections");
+    try { const n = await relabelDevice(); toast(`Learned from ${fmt(choice.size)} photos. ${fmt(n)} photos changed folder. Tap Teach it again for the next ones.`); }
+    catch (e) { toast(`Could not re-sort: ${e.message || e}`); }
+    setPill("live", "Sorted");
+  };
+  const forget = async () => {
+    examples = {}; store.put("kv", "examples", examples); closeAll();
+    try { await relabelDevice(); toast("Forgot what you taught it. Photos you moved by hand stay where you put them."); } catch (e) { toast(`Could not re-sort: ${e.message || e}`); }
+  };
+  dialog("Teach it", [
+    el("p", { class: "meta", style: "margin-bottom:10px" }, "These are the photos it is least sure about. Fix the wrong ones and leave the right ones as they are. It learns from all of them and re-sorts everything." + (taught ? ` Taught so far: ${fmt(taught)} photos.` : "")),
+    grid,
+  ], [taught ? el("button", { class: "btn ghost", id: "forgetbtn", onclick: forget }, "Forget what I taught it") : null, el("button", { class: "btn", onclick: closeAll }, sample.length ? "Not now" : "Close"), sample.length ? el("button", { class: "btn solid", id: "teachgo", onclick: go }, "Teach it") : null]);
+}
+
+/* ---------- import, apply changes, undo ---------- */
+const sheetProgress = title => { // a bottom sheet with a bar and one line; returns [bar, note]
+  const bar = el("i", { style: "width:0%" }), note = el("p", { class: "meta", id: "movenote" }, "Waiting for Android to ask…");
+  dialog(title, [el("div", { class: "pbar" }, bar), note]);
+  return [bar, note];
+};
+async function moveInBatches(todo, bar, note, verb, done) { // todo: [{ uri, to, name }] -> { ok, bad, denied }
+  let ok = 0, bad = 0, denied = false;
+  for (let i = 0; i < todo.length; i += BATCH) {
+    note.textContent = `${verb} ${fmt(Math.min(todo.length, i + BATCH))} of ${fmt(todo.length)}. Allow it when Android asks.`;
+    let r;
+    try { r = await library.move(todo.slice(i, i + BATCH)); } catch (e) { if (e.message === "denied") { denied = true; break; } throw e; }
+    ok += r.moved.length; bad += r.failed.length;
+    await done(r.moved, i);
+    bar.style.width = Math.min(100, Math.round(((i + BATCH) / todo.length) * 100)) + "%";
   }
-  toast(failedMove || `Moved to ${catBy[key].label}.${demo ? " (Demo: nothing is saved.)" : ""}`);
-  fillStatic(); showDone(false); persist();
+  return { ok, bad, denied };
+}
+const cancelBtn = () => el("button", { class: "btn ghost", onclick: closeAll }, "Cancel");
+function openImport() {
+  const todo = pending(), n = todo.length, base = cleanDest(settings.dest), asks = Math.ceil(n / BATCH);
+  if (!n) return toast("Everything is already in the right album.");
+  dialog(imp ? "Apply changes" : "Import into your gallery", [
+    el("div", { class: "card stack" },
+      el("p", {}, el("b", {}, `${fmt(n)} files`), ` will be moved into albums under Pictures/${base} and Movies/${base}.`),
+      el("p", { class: "meta" }, "They are moved, not copied, so nothing is stored twice. Folders left empty disappear from your gallery by themselves."),
+      el("p", { class: "meta" }, `Android asks you to allow it ${asks > 1 ? `${fmt(asks)} times (once per 1,000 files)` : "once"}. Undo import puts everything back.`))],
+    [cancelBtn(), el("button", { class: "btn solid", id: "doimport", onclick: () => importNow(todo) }, imp ? "Apply" : "Import")]);
+}
+async function importNow(todo) {
+  const [bar, note] = sheetProgress("Moving your files");
+  imp ||= { at: Date.now(), csv: false, moves: {} };
+  let res = { ok: 0, bad: 0, denied: false }, err = "";
+  try {
+    res = await moveInBatches(todo.map(w => ({ uri: w.it.uri, to: w.to, name: w.name })), bar, note, "Moved", async moved => {
+      const by = new Map(todo.map(w => [w.it.uri, w])), names = new Map(moved.map(m => [m.uri, m.name]));
+      for (const [uri, name] of names) { const w = by.get(uri); imp.moves[uri] = { from: imp.moves[uri]?.from || { rel: w.it.rel, name: w.it.name }, to: { rel: w.to, name } }; }
+      await store.put("kv", "import", imp); // saved after every batch, so Undo works even if the app is closed halfway
+    });
+  } catch (e) { err = e.message || String(e); }
+  if (!Object.keys(imp.moves).length) { imp = null; await store.put("kv", "import", null); }
+  else if (!err) { try { await writeCsvs(cleanDest(settings.dest), items, planOutput(items, labels, cats, dupes)); imp.csv = true; } catch { imp.csv = false; } await store.put("kv", "import", imp); }
+  closeAll(); renderPanel(); persist();
+  toast(err ? `Stopped: ${err}` : res.denied ? `You said no, so ${fmt(res.ok)} files were moved. Press Apply changes to continue.` : `Moved ${fmt(res.ok)} files.${res.bad ? ` ${fmt(res.bad)} could not be moved.` : ""}`);
+}
+function openUndo() {
+  const n = Object.keys(imp?.moves || {}).length; if (!n) return;
+  dialog("Undo import", [el("div", { class: "card stack" },
+    el("p", {}, `Put ${fmt(n)} files back in the folders they came from?`),
+    el("p", { class: "meta" }, "Files you moved or deleted yourself since the import are left alone. Android asks you to allow it, once per 1,000 files."))],
+  [cancelBtn(), el("button", { class: "btn solid", id: "doundo", onclick: undoNow }, "Undo import")]);
+}
+async function undoNow() {
+  const [bar, note] = sheetProgress("Putting files back");
+  let res = { ok: 0, bad: 0, denied: false }, err = "", skipped = 0;
+  try {
+    const now = new Map((await library.list()).map(m => [m.uri, m])), all = Object.entries(imp.moves);
+    const mine = ([uri, m]) => (now.get(uri)?.rel || "").toLowerCase() === m.to.rel.toLowerCase(), byUri = new Map(items.map(i => [i.uri, i]));
+    const todo = all.filter(mine).map(([uri, m]) => ({ uri, to: m.from.rel, name: m.from.name }));
+    skipped = all.length - todo.length; // moved or deleted by you since: left alone
+    for (const e of all) if (!mine(e) && byUri.get(e[0]) && now.get(e[0])) byUri.get(e[0]).rel = now.get(e[0]).rel; // remember where you put them
+    res = await moveInBatches(todo, bar, note, "Restored", async moved => {
+      for (const m of moved) { const back = imp.moves[m.uri]; if (byUri.get(m.uri) && back) byUri.get(m.uri).rel = back.from.rel; delete imp.moves[m.uri]; }
+      await store.put("kv", "import", imp);
+    });
+    if (!res.denied) for (const [uri] of all) delete imp.moves[uri]; // the skipped ones are no longer ours to undo
+  } catch (e) { err = e.message || String(e); }
+  if (!Object.keys(imp.moves).length) imp = null;
+  await store.put("kv", "import", imp);
+  closeAll(); renderPanel(); persist();
+  toast(err ? `Stopped: ${err}` : res.denied ? `You said no. ${fmt(res.ok)} files were put back; press Undo import to finish.` : `Put ${fmt(res.ok)} files back.${skipped ? ` ${fmt(skipped)} were moved or deleted since, so they were left alone.` : ""}${res.bad ? ` ${fmt(res.bad)} could not be moved.` : ""}`);
 }
 
 /* ---------- picking files ---------- */
@@ -726,6 +843,7 @@ $("picker").addEventListener("change", async e => {
 async function init() {
   paintIcons();
   lastLibrary = (await store.get("kv", "library")) || null;
+  examples = (await store.get("kv", "examples")) || {}; imp = (await store.get("kv", "import")) || null;
   if (params.has("demo")) { mode = "done"; await startDemo(); }
   else { mode = "setup"; renderApp(); }
   requestAnimationFrame(tick);

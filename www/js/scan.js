@@ -1,6 +1,6 @@
 // Step 1, on the phone: read each picked file (never changed), fingerprint it, make a 256px preview and a 72px copy
 // for the animation, and a perceptual hash for finding look-alikes.
-import { extOf, kindOf, phashFromGray } from "./core.js";
+import { extOf, isScreenCapture, kindOf, phashFromGray } from "./core.js";
 import * as library from "./library.js";
 
 const PREVIEW = 256, MINI = 72;
@@ -53,7 +53,8 @@ function videoPreview(file) {
 // -> { rec, thumb: Blob, mini: Blob }. A file that cannot be read stays in the list, flagged, with a grey preview.
 export async function scanFile(file, id) {
   const kind = file.kind || kindOf(file.name, file.type) || "photo";
-  const rec = { id, name: file.name, ext: extOf(file.name) || (kind === "video" ? ".mp4" : ".jpg"), kind, bytes: file.size, taken: file.lastModified ? Math.round(file.lastModified / 1000) : null };
+  const rec = { id, name: file.name, ext: extOf(file.name) || (kind === "video" ? ".mp4" : ".jpg"), kind, bytes: file.size, taken: file.lastModified ? Math.round(file.lastModified / 1000) : null,
+    screen: isScreenCapture(file.name, file.rel), ...(file.native ? { uri: file.uri, rel: file.rel } : {}) }; // screen: a screenshot or screen recording, by its name and folder
   try { rec.sha = file.native ? await library.sha(file) : await fingerprint(file); } catch { rec.sha = `unreadable-${id}`; }
   let c;
   try {
